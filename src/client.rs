@@ -1,35 +1,74 @@
 mod net;
 use net::*;
-use std::sync::Mutex;
+use std::time;
+use std::sync::mpsc;
+
 
 struct Client{
 	should_stop : bool,
 	server : Option<Peer<SeMessage>>,
-	server_mutex : Mutex<u8>,
-	token : Token,
-	username : String,
+	input_rx : mpsc::Receiver<String>
 }
 
 impl Client{
-	pub fn new() -> Self{
+	pub fn new(input_rx : mpsc::Receiver<String>) -> Self{
 		return Client{
 			should_stop : false,
 			server : None,
-			server_mutex : Mutex::new(0),
-			token : 0,
-			username : String::new()
+			input_rx
 		};
 	}
 
 	pub fn run(&mut self){
-		while !self.should_stop(){
+		while !self.should_stop{
 			self.process_input();
+			self.process_messages();
+		}
+	}
+
+	pub fn process_messages(&mut self){
+		let mut server = match &mut self.server {
+		    Some(v) => {v}
+		    None => {return;}
+		};
+		server.get_messages();
+		let mut messages : Vec<SeMessage> = Vec::new();
+		loop{
+			let msg = match server.messages.pop_back(){
+			    Some(v) => {v}
+			    None => {break;}
+			};
+			messages.push(msg);
+		}
+		for msg in messages{
+			self.process_message(&msg);
+		}
+	}
+
+	pub fn process_message(&mut self, msg : &SeMessage){
+		match msg{
+		    SeMessage::Mesg(v) => {
+				println!("{}", v.mesg);
+			}
+		    SeMessage::Info(v) => {
+				println!("There are {} users on the server:", v.users.len());
+				for user in v.users.iter(){
+					println!("- {}", user);
+				}
+			}
+		    SeMessage::UQuit(v) => {
+				println!("You was kicked for the reason: {}", v.reason);
+				self.disconnect();
+			}
+			SeMessage::Hello(_) => {}//handled by join()
 		}
 	}
 
 	pub fn process_input(&mut self){
-		let mut command = String::new();
-		std::io::stdin().read_line(&mut command);
+		let mut command = match self.input_rx.try_recv(){
+		    Ok(v) => {v},
+		    Err(_) => {return;}
+		};
 		command.trim();
 		let space_pos = match command.find(' '){
 			Some(v) => v,
@@ -45,20 +84,19 @@ impl Client{
 			"/join" => {self.join(arg);}
 			"/disconnect" => {self.disconnect();}
 			"/say" => {self.say(arg);}
-			"/exit" => {self.exit();}
+			"/exit" => {self.terminate()}
 			_ =>{println!("Unrecognized command. Try /help")}
 		}
 	}
 
 	pub fn join(&mut self, arg: String){
-		
-		match &mut self.server{
-		    Some(v) => {
+		match self.server{
+		    Some(_) => {
 				println!("Already connected to a server");
 				return;
 			}
 		    None => {}
-		}
+		};
 		let mut iter = arg.split_whitespace();
 		let addr = match iter.next(){
 		    Some(v) => {v}
@@ -81,11 +119,12 @@ impl Client{
 				return;
 			}
 		};
-		self.username = username.to_string();
 		let mut peer : Peer<SeMessage> = Peer::new(&0u64, stream);
+		peer.username = username.to_string();
 		let hello = ClMessage::Hello(ClHello{username : username.to_string()});
 		peer.send(&hello);
 		let started_at = std::time::Instant::now();
+		println!("Connecting...");
 		loop{ //loop till something arrives
 			peer.get_messages();
 			//wait some time for server to respond
@@ -99,7 +138,7 @@ impl Client{
 			};
 			match response{
 			    SeMessage::Hello(msg) => {
-					self.token = msg.token;
+					peer.token = msg.token;
 					break;
 				}
 			    _ => {
@@ -113,8 +152,8 @@ impl Client{
 
 	pub fn disconnect(&mut self){
 		match &mut self.server {
-			Some(v) => {
-				v.send(&ClMessage::IQuit(self.token));
+			Some(server) => {
+				server.send(&ClMessage::IQuit(server.token));
 				self.server = None;
 			}
 			None => {
@@ -123,20 +162,24 @@ impl Client{
 		}
 	}
 
-	pub fn say(&mut self, arg: String){
-		let mesg = ClMesg{
-				username : self.username.clone(),
-				token : self.token,
-				mesg : arg
-		};
-		match &mut self.server {
-		    Some(v) => {v.send(&ClMessage::Mesg(mesg));}
-		    None => {println!("Not connected to a server");}
-		}
+	pub fn terminate(&mut self){
+		self.should_stop = true;
 	}
 
-	pub fn exit(&mut self){
-		self.should_stop = true;
+	pub fn say(&mut self, arg: String){
+		let mut server = match &mut self.server {
+		    Some(v) => {v}
+		    None => {
+				println!("Can't /say - not connected to a server");
+				return;
+			}
+		};
+		let mesg = ClMesg{
+				username : server.username.clone(),
+				token : server.token,
+				mesg : arg
+		};
+		server.send(&ClMessage::Mesg(mesg));
 	}
 
 	pub fn print_help(&self){
@@ -148,12 +191,21 @@ impl Client{
 			/exit - exits the program");
 	}
 
-	pub fn should_stop(&self) -> bool{
-		return self.should_stop;
+	pub fn get_input(tx : mpsc::Sender<String>){
+		loop{
+			let mut command = String::new();
+			std::io::stdin().read_line(&mut command);
+			match tx.send(command){
+			    Ok(_) => {continue;}
+			    Err(_) => {return;}
+			}
+		}
 	}
 }
 
 fn main(){
-	let mut client = Client::new();
+	let (tx, rx) = mpsc::channel();
+	let mut client = Client::new(rx);
+	let join_handle = std::thread::spawn(move || {Client::get_input(tx);});
 	client.run();
 }
