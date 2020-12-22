@@ -3,7 +3,6 @@ use net::*;
 use std::time;
 use std::sync::mpsc;
 
-
 struct Client{
 	should_stop : bool,
 	server : Option<Peer<SeMessage>>,
@@ -65,28 +64,52 @@ impl Client{
 	}
 
 	pub fn process_input(&mut self){
-		let mut command = match self.input_rx.try_recv(){
+		let mut input = match self.input_rx.try_recv(){
 		    Ok(v) => {v},
 		    Err(_) => {return;}
 		};
-		command.trim();
+		let mut command = input.trim().to_string();
+		//commands without arguments
+		match command.as_str(){
+			"/help" => {
+				self.print_help();
+			}
+			"/exit" => {
+				self.terminate();
+			}
+			"/disconnect" => {
+				self.disconnect();
+			}
+			"/info" => {
+				self.request_server_info();
+			}
+			_ => {}
+		}
 		let space_pos = match command.find(' '){
 			Some(v) => v,
 			None => {
-				println!("Incorrect command");
+				//it means that the command is just on word, and was handled before
 				return;
 			}
 		};
 		let arg = command.split_off(space_pos);
 
 		match command.as_str(){
-			"/help" => {self.print_help();}
 			"/join" => {self.join(arg);}
-			"/disconnect" => {self.disconnect();}
 			"/say" => {self.say(arg);}
-			"/exit" => {self.terminate()}
 			_ =>{println!("Unrecognized command. Try /help")}
 		}
+	}
+
+	pub fn request_server_info(&mut self){
+		let mut server = match &mut self.server {
+			Some(v) => {v}
+			None => {
+				println!("Can't /info - not connected to a server");
+				return;
+			}
+		};
+		server.send(&ClMessage::IWantInfo(server.token));
 	}
 
 	pub fn join(&mut self, arg: String){
@@ -128,7 +151,7 @@ impl Client{
 		loop{ //loop till something arrives
 			peer.get_messages();
 			//wait some time for server to respond
-			if std::time::Duration::from_secs(10) > started_at.elapsed(){
+			if std::time::Duration::from_secs(10) < started_at.elapsed(){
 				eprintln!("Timed out");
 				return;
 			}
@@ -147,6 +170,7 @@ impl Client{
 				}
 			}
 		}
+		println!("Connected");
 		self.server = Some(peer);
 	}
 
@@ -183,12 +207,13 @@ impl Client{
 	}
 
 	pub fn print_help(&self){
-		println!("A list of availible command:\n
-			/help - displays help on commands\n
-			/join <adress> <username> - joins a server at <adress> with <username>\n
-			/disconnect - disconnects from a server\n
-			/say <message> - sends a message to the chat\n
-			/exit - exits the program");
+		println!("A list of availible commands:
+/help - displays help on commands
+/join <adress> <username> - joins a server at <adress> with <username>
+/disconnect - disconnects from a server
+/say <message> - sends a message to the chat
+/exit - exits the program
+/info - prints information about server");
 	}
 
 	pub fn get_input(tx : mpsc::Sender<String>){

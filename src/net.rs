@@ -109,13 +109,14 @@ impl MesgBuilder{
 					if to_read > slice.len() - pos{
 						to_read = slice.len() - pos;
 					}
-					self.size_buff.copy_from_slice(&slice[pos..pos+to_read]);
+					self.size_buff.append(&mut slice[pos..pos+to_read].to_vec());
 					pos += to_read;
 					self.size_left -= to_read;
 
 					if self.size_left == 0{
 						self.state = BuilderState::GettingPacket;
 						let pck_size : pck_size_t = bincode::deserialize(&self.size_buff[0..2]).unwrap();
+						self.size_buff.clear();
 						self.pck_left = pck_size as usize;
 					}
 				}
@@ -124,7 +125,7 @@ impl MesgBuilder{
 					if to_read > slice.len() - pos{
 						to_read = slice.len() - pos;
 					}
-					self.pck_buff.copy_from_slice(&slice[pos..pos+to_read]);
+					self.pck_buff.append(&mut slice[pos..pos+to_read].to_vec());
 					pos += to_read;
 					self.pck_left -= to_read;
 
@@ -132,6 +133,7 @@ impl MesgBuilder{
 						self.state = BuilderState::GettingSize;
 						self.size_left = std::mem::size_of::<pck_size_t>();
 						let mesg = bincode::deserialize(&self.pck_buff[..]).unwrap();
+						self.pck_buff.clear();
 						mesgs.push(mesg);
 					}
 				}
@@ -175,6 +177,7 @@ where RE_T: for<'a> serde::Deserialize<'a>
 	}
 
 	pub fn new(token : &Token, stream : TcpStream) -> Self{
+		stream.set_nonblocking(true);
 		let peer = Peer{
 			username : String::new(),
 			token :  *token,
@@ -209,13 +212,6 @@ where RE_T: for<'a> serde::Deserialize<'a>
 
 	pub fn get_messages(&mut self){
 		let mut buff = [0u8; 1024];
-		match self.stream.peek(&mut buff){
-		    Ok(n) => {
-				if n == 0{
-					return;	}
-			}
-		    Err(_) => {return;}
-		};
 
 		let n = match self.stream.read(&mut buff){
 		    Ok(n) => n,

@@ -14,12 +14,14 @@ struct Server{
 	name_map : HashMap<String, Token>, //a map from username to token
 	peers : HashMap<Token, Peer<ClMessage>>, //key is token
 	rx : std::sync::mpsc::Receiver<TcpStream>, //receiver of stream from listening_thread
+	input_rx : std::sync::mpsc::Receiver<String>,
 	should_stop : bool
 }
 
 impl Server{
-	pub fn new(rx : std::sync::mpsc::Receiver<TcpStream>) -> Self{
+	pub fn new(rx : std::sync::mpsc::Receiver<TcpStream>, input_rx : std::sync::mpsc::Receiver<String>,) -> Self{
 		let server = Server{
+			input_rx,
 			rx,
 			peers : HashMap::new(),
 			should_stop : false,
@@ -43,29 +45,32 @@ impl Server{
 				peer.token = token;
 				peer.username = mesg.username.clone();
 			}
-		    None => {invalid_tok()}
+		    None => {
+				invalid_tok();
+				return;
+			}
 		}
-
+		println!("{} joined", mesg.username);
+		self.broadcast(&format!("{} joined", mesg.username));
 	}
 
-	fn verify(&self, token : &Token, username : &String) -> bool{
-		let peer = match self.peers.get(token){
-		    Some(p) => {p}
-		    None => {return false;}
+	fn verify(&self, token : &Token) -> bool{
+		match self.peers.get(token){
+		    Some(_) => {
+				return true;
+			}
+		    None => {
+				println!("Counldn't find user with token {}", token);
+				return false;
+			}
 		};
-		if peer.username != *username{
-			return false
-		}
-		return true;
+
 	}
 
-	fn broadcast(&mut self, mesg : &ClMesg){
-		if !self.verify(&mesg.token, &mesg.username){
-			return;
-		}
-		let text = mesg.username.clone() + ": " + &mesg.mesg[..];
+	fn broadcast(&mut self, mesg : &String){
+		println!("{}", mesg);
 		let mesg = SeMessage::Mesg(
-			SeMesg{ mesg : text});
+			SeMesg{ mesg : mesg.clone() });
 		for (_, peer) in self.peers.iter_mut(){
 			peer.send(&mesg);
 		}
@@ -85,6 +90,11 @@ impl Server{
 	}
 
 	fn disconnect(&mut self, token : Token, reason : &String){
+		let username = match self.peers.get(&token){
+		    Some(v) => {v.username.clone()}
+		    None => {"".to_string()}
+		};
+		self.broadcast(&format!("{} left: {}", username, reason));
 		let mesg = SeMessage::UQuit(SeUQuit{reason : reason.clone()});
 		match self.peers.get_mut(&token){
 		    Some(p) => {p.send(&mesg)}
@@ -104,9 +114,14 @@ impl Server{
 		self.keep_peer(token); //reset last activity time upon recieving a message from peer
 		match mesg {
 		    ClMessage::Hello(m) => {self.authorize(token, &m)}
-		    ClMessage::Mesg(m) => {self.broadcast(&m)}
+		    ClMessage::Mesg(m) => {
+				if !self.verify(&m.token){
+					return;
+				}
+				self.broadcast(&(m.username.clone() + ": " + m.mesg.as_str()));
+			}
 		    ClMessage::IWantInfo(m) => {self.send_info(m)}
-		    ClMessage::IQuit(m) => {self.peers.remove(&m);}
+		    ClMessage::IQuit(m) => {self.disconnect(m, &"".to_string());}
 		    ClMessage::Ping(m) => {self.keep_peer(m)}
 		}
 	}
@@ -145,23 +160,84 @@ impl Server{
 	}
 
 	pub fn run(&mut self){
-		while self.should_stop {
+		while !self.should_stop {
 			match self.rx.try_recv(){
 			    Ok(peer) => {self.register(peer)}
 			    Err(_) => {}
 			}
 			self.get_messages();
 			self.process_messages();
+				self.process_input();
 		}
+	}
+
+	pub fn process_input(&mut self){
+		let mut input = match self.input_rx.try_recv(){
+		    Ok(v) => {v},
+		    Err(_) => {return;}
+		};
+		let mut command = input.trim().to_string();
+		//commands without arguments
+		match command.as_str(){
+			"/stop" => {
+				self.should_stop = true;
+			}
+			_ => {}
+		}
+		let space_pos = match command.find(' '){
+			Some(v) => v,
+			None => {
+				//it means that the command is just one word, and was handled before
+				return;
+			}
+		};
+		let arg = command.split_off(space_pos);
+
+		match command.as_str(){
+			"/kick" => {
+				self.kick(arg);
+			}
+			_ =>{println!("Unrecognized command. Try /help")}
+		}
+	}
+
+	pub fn kick(&mut self, arg :String){
+		let mut iter = arg.split_whitespace();
+		let username = match iter.next(){
+		    Some(v) => {v.trim()}
+		    None => {
+				eprintln!("No username provided");
+				return;
+			}
+		};
+		let mut reason = String::new();
+		reason.reserve(arg.len());
+		loop{
+			match iter.next() {
+			    Some(v) => {
+					reason += v;
+					reason += " ";
+				}
+			    None => {break;}
+			}
+		}
+		let token = match self.name_map.get(username){
+			Some(v) => v,
+			None =>{
+				println!("No such user: {}", username);
+				return;
+			}
+		};
+		self.disconnect(*token, &reason.to_string());
 	}
 }
 
 fn listen(tx : std::sync::mpsc::Sender<TcpStream>){
 	let listener = loop{
-		print!("Enter adress to listen: ");
+		println!("Enter adress to listen: ");
 		let mut addr = String::new();
 		std::io::stdin().read_line(&mut addr);
-		let listener = match TcpListener::bind(addr){
+		let listener = match TcpListener::bind(addr.trim()){
 		    Ok(n) => n,
 		    Err(_) => {
 				eprintln!("Couldn't bind to adress");
@@ -184,9 +260,22 @@ fn listen(tx : std::sync::mpsc::Sender<TcpStream>){
 	}
 }
 
+fn get_input(tx : std::sync::mpsc::Sender<String>){
+	loop{
+		let mut command = String::new();
+		std::io::stdin().read_line(&mut command);
+		match tx.send(command){
+			Ok(_) => {continue;}
+			Err(_) => {return;}
+		}
+	}
+}
+
 fn main() {
+	let (cli_tx, cli_rx) = std::sync::mpsc::channel();
 	let (tx, rx) = std::sync::mpsc::channel();
+	let input_thread = std::thread::spawn(move || {get_input(cli_tx)});
 	let listening_thread = std::thread::spawn(move || {listen(tx)});
-	let mut server = Server::new(rx);
+	let mut server = Server::new(rx, cli_rx);
 	server.run();
 }
