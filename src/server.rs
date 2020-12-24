@@ -136,7 +136,14 @@ impl Server{
 				self.broadcast(&(m.username.clone() + ": " + m.mesg.as_str()));
 			}
 		    ClMessage::IWantInfo(m) => {self.send_info(m)}
-		    ClMessage::IQuit(m) => {self.disconnect(m, &"".to_string());}
+		    ClMessage::IQuit(m) => {
+				let username = match self.peers.get(&m){
+				    Some(p) => {p.username.clone()}
+				    None => {return;}
+				};
+				self.broadcast(&format!("{} left", username));
+				self.disconnect(m, &"".to_string());
+			}
 		    ClMessage::Ping(m) => {}
 		}
 	}
