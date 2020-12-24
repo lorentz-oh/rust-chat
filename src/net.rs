@@ -45,6 +45,13 @@ pub struct SeUQuit{
 	pub reason : String
 }
 
+//overall protocol works like this:
+//a client sends ClMessage::Hello
+//server responds with SeMessage::Hello if it allows joining, or with SeMessage::UQuit if id doesn't
+//a client now may chat via ClMessage::Mesg packets
+//if a client wants to leave, it sends ClMessage::IQuit
+//if a server wants to remove client, it does so but sends SeMessage::UQuit first
+
 //messages that a client might send
 #[derive(serde::Deserialize, serde::Serialize)]
 pub enum ClMessage{
@@ -60,8 +67,8 @@ pub enum ClMessage{
 pub enum SeMessage{
 	Hello(SeHello),//sent after client hello
 	Mesg(SeMesg),//a message to the client
-	Info(SeInfo),//server sent information abouts server
-	UQuit(SeUQuit),//sent upon kicking from chat
+	Info(SeInfo),//information about server
+	UQuit(SeUQuit),//sent upon kicking from chat or if authentithication is refused
 }
 
 pub enum PeerState{

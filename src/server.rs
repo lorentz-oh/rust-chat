@@ -2,6 +2,7 @@ extern crate rand;
 extern crate serde;
 extern crate bincode;
 
+use std::sync::{Arc, Mutex};
 use std::io::prelude::*;
 use std::net::TcpListener;
 use std::net::TcpStream;
@@ -36,9 +37,24 @@ impl Server{
 	}
 
 	fn authorize(&mut self, token : Token, mesg : &ClHello){
-		let response = SeMessage::Hello(SeHello{token});
+		if !mesg.username.chars().all(char::is_alphanumeric){
+			self.disconnect(token, &"Username contains illegal character".to_string());
+			return;
+		}
+		if self.name_map.contains_key(&mesg.username){
+			self.disconnect(token, &"Username is in use".to_string());
+			return;
+		}
+
+
 		match self.peers.get_mut(&token){
 		    Some(peer) => {
+				match peer.state {
+				    PeerState::AwaitingAuth => {}
+				    PeerState::Chatting => {return;} //an attempt to authorize while authorized
+				    PeerState::Quitting => {}
+				}
+				let response = SeMessage::Hello(SeHello{token});
 				peer.send(&response);
 				self.name_map.insert(mesg.username.clone(), token);
 				peer.state = PeerState::Chatting;
@@ -50,7 +66,6 @@ impl Server{
 				return;
 			}
 		}
-		println!("{} joined", mesg.username);
 		self.broadcast(&format!("{} joined", mesg.username));
 	}
 
@@ -94,12 +109,15 @@ impl Server{
 		    Some(v) => {v.username.clone()}
 		    None => {"".to_string()}
 		};
-		self.broadcast(&format!("{} left: {}", username, reason));
+		if username.len() > 0 && reason.len() > 0{
+			self.broadcast(&format!("{} left: {}", username, reason));
+		}
 		let mesg = SeMessage::UQuit(SeUQuit{reason : reason.clone()});
 		match self.peers.get_mut(&token){
 		    Some(p) => {p.send(&mesg)}
 		    None => {}
 		}
+		self.name_map.remove(&username);
 		self.peers.remove(&token);
 	}
 
@@ -160,6 +178,7 @@ impl Server{
 	}
 
 	pub fn run(&mut self){
+
 		while !self.should_stop {
 			match self.rx.try_recv(){
 			    Ok(peer) => {self.register(peer)}
@@ -167,7 +186,7 @@ impl Server{
 			}
 			self.get_messages();
 			self.process_messages();
-				self.process_input();
+			self.process_input();
 		}
 	}
 
@@ -177,25 +196,30 @@ impl Server{
 		    Err(_) => {return;}
 		};
 		let mut command = input.trim().to_string();
+		let arg = match command.find(' ') {
+		    Some(pos) => {command.split_off(pos)}
+		    None => {"".to_string()}
+		};
+
 		//commands without arguments
 		match command.as_str(){
+			"/help" =>{Server::print_help();}
 			"/stop" => {
+				let reason = "Server closed".to_string();
+				let mut tokens = Vec::new();
+				for (token, _) in self.peers.iter_mut(){
+					tokens.push(token.clone());
+				}
+				for token in tokens{
+					self.disconnect(token, &reason)
+				}
 				self.should_stop = true;
 			}
-			_ => {}
-		}
-		let space_pos = match command.find(' '){
-			Some(v) => v,
-			None => {
-				//it means that the command is just one word, and was handled before
-				return;
-			}
-		};
-		let arg = command.split_off(space_pos);
-
-		match command.as_str(){
 			"/kick" => {
 				self.kick(arg);
+			}
+			"/say" =>{
+				self.broadcast(&("Server -- ".to_string() + &arg[..]));
 			}
 			_ =>{println!("Unrecognized command. Try /help")}
 		}
@@ -230,11 +254,21 @@ impl Server{
 		};
 		self.disconnect(*token, &reason.to_string());
 	}
+
+	pub fn print_help(){
+		println!("--------------------
+A list of availible commands:
+/help - displays help on commands
+/kick <username> - kicks a user with <username>
+/say <message> - sends a message
+/stop - stops the server
+--------------------")
+	}
 }
 
-fn listen(tx : std::sync::mpsc::Sender<TcpStream>){
+fn listen(tx : std::sync::mpsc::Sender<TcpStream>, is_bound : Arc<Mutex<bool>>){
 	let listener = loop{
-		println!("Enter adress to listen: ");
+		println!("Enter address to listen: ");
 		let mut addr = String::new();
 		std::io::stdin().read_line(&mut addr);
 		let listener = match TcpListener::bind(addr.trim()){
@@ -244,9 +278,12 @@ fn listen(tx : std::sync::mpsc::Sender<TcpStream>){
 				continue;
 			}
 		};
+		*is_bound.lock().unwrap() = true;
 		break listener;
 	};
 
+	println!("Listening");
+	println!("Type /help for a list of commands");
 	for stream in listener.incoming(){
 		let mut stream = match stream {
 			Ok(val) => {val},
@@ -260,7 +297,10 @@ fn listen(tx : std::sync::mpsc::Sender<TcpStream>){
 	}
 }
 
-fn get_input(tx : std::sync::mpsc::Sender<String>){
+fn get_input(tx : std::sync::mpsc::Sender<String>, is_bound : Arc<Mutex<bool>>){
+	while !*is_bound.lock().unwrap(){
+		//wait till it's bound
+	}
 	loop{
 		let mut command = String::new();
 		std::io::stdin().read_line(&mut command);
@@ -272,10 +312,13 @@ fn get_input(tx : std::sync::mpsc::Sender<String>){
 }
 
 fn main() {
+	let mut is_bound = Arc::new(Mutex::new(false)); //whether server was bound to an address
 	let (cli_tx, cli_rx) = std::sync::mpsc::channel();
 	let (tx, rx) = std::sync::mpsc::channel();
-	let input_thread = std::thread::spawn(move || {get_input(cli_tx)});
-	let listening_thread = std::thread::spawn(move || {listen(tx)});
+	let is_bound_clone = is_bound.clone();
+	let input_thread = std::thread::spawn(move || {get_input(cli_tx, is_bound_clone)});
+	let is_bound_clone = is_bound.clone();
+	let listening_thread = std::thread::spawn(move || {listen(tx, is_bound_clone)});
 	let mut server = Server::new(rx, cli_rx);
 	server.run();
 }

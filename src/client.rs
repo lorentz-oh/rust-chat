@@ -19,6 +19,7 @@ impl Client{
 	}
 
 	pub fn run(&mut self){
+		println!("For list of availible commands type /help");
 		while !self.should_stop{
 			self.process_input();
 			self.process_messages();
@@ -50,10 +51,12 @@ impl Client{
 				println!("{}", v.mesg);
 			}
 		    SeMessage::Info(v) => {
+				println!("--------------------");
 				println!("There are {} users on the server:", v.users.len());
 				for user in v.users.iter(){
 					println!("- {}", user);
 				}
+				println!("--------------------");
 			}
 		    SeMessage::UQuit(v) => {
 				println!("You was kicked for the reason: {}", v.reason);
@@ -69,8 +72,12 @@ impl Client{
 		    Err(_) => {return;}
 		};
 		let mut command = input.trim().to_string();
-		//commands without arguments
-		match command.as_str(){
+		let arg = match command.find(' ') {
+		    Some(pos) => {command.split_off(pos)}
+		    None => {"".to_string()}
+		};
+
+		match command.as_str() {
 			"/help" => {
 				self.print_help();
 			}
@@ -83,18 +90,6 @@ impl Client{
 			"/info" => {
 				self.request_server_info();
 			}
-			_ => {}
-		}
-		let space_pos = match command.find(' '){
-			Some(v) => v,
-			None => {
-				//it means that the command is just on word, and was handled before
-				return;
-			}
-		};
-		let arg = command.split_off(space_pos);
-
-		match command.as_str(){
 			"/join" => {self.join(arg);}
 			"/say" => {self.say(arg);}
 			_ =>{println!("Unrecognized command. Try /help")}
@@ -164,6 +159,10 @@ impl Client{
 					peer.token = msg.token;
 					break;
 				}
+				SeMessage::UQuit(mesg) =>{
+					eprintln!("Server refused in connection for the reason: {}", mesg.reason);
+					return;
+				}
 			    _ => {
 					eprintln!("Error: Expected hello from server, got something else");
 					return;
@@ -207,13 +206,15 @@ impl Client{
 	}
 
 	pub fn print_help(&self){
-		println!("A list of availible commands:
+		println!("--------------------
+A list of availible commands:
 /help - displays help on commands
 /join <adress> <username> - joins a server at <adress> with <username>
 /disconnect - disconnects from a server
 /say <message> - sends a message to the chat
 /exit - exits the program
-/info - prints information about server");
+/info - prints information about server
+--------------------");
 	}
 
 	pub fn get_input(tx : mpsc::Sender<String>){
