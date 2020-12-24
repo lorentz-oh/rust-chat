@@ -109,9 +109,6 @@ impl Server{
 		    Some(v) => {v.username.clone()}
 		    None => {"".to_string()}
 		};
-		if username.len() > 0 && reason.len() > 0{
-			self.broadcast(&format!("{} left: {}", username, reason));
-		}
 		let mesg = SeMessage::UQuit(SeUQuit{reason : reason.clone()});
 		match self.peers.get_mut(&token){
 		    Some(p) => {p.send(&mesg)}
@@ -140,7 +137,7 @@ impl Server{
 			}
 		    ClMessage::IWantInfo(m) => {self.send_info(m)}
 		    ClMessage::IQuit(m) => {self.disconnect(m, &"".to_string());}
-		    ClMessage::Ping(m) => {self.keep_peer(m)}
+		    ClMessage::Ping(m) => {}
 		}
 	}
 
@@ -187,11 +184,27 @@ impl Server{
 			self.get_messages();
 			self.process_messages();
 			self.process_input();
+			self.kick_inactive();
+		}
+	}
+
+	pub fn kick_inactive(&mut self){
+		let mut inactive = Vec::new();
+		for (token, peer) in &mut self.peers{
+			if peer.silent_from.elapsed() > MAX_SILENCE{
+				inactive.push((*token, peer.username.clone()));
+			}
+		}
+		for(_, username) in & inactive{
+			self.broadcast(&format!("-- {} timed out --", username));
+		}
+		for (token, _) in & inactive{
+			self.disconnect(*token, &"timed out".to_string());
 		}
 	}
 
 	pub fn process_input(&mut self){
-		let mut input = match self.input_rx.try_recv(){
+		let input = match self.input_rx.try_recv(){
 		    Ok(v) => {v},
 		    Err(_) => {return;}
 		};
@@ -246,13 +259,14 @@ impl Server{
 			}
 		}
 		let token = match self.name_map.get(username){
-			Some(v) => v,
+			Some(v) => *v,
 			None =>{
 				println!("No such user: {}", username);
 				return;
 			}
 		};
-		self.disconnect(*token, &reason.to_string());
+		self.disconnect(token, &reason.to_string());
+		self.broadcast(&format!("{} was disconnected for the reason: {}", username, reason));
 	}
 
 	pub fn print_help(){
@@ -285,7 +299,7 @@ fn listen(tx : std::sync::mpsc::Sender<TcpStream>, is_bound : Arc<Mutex<bool>>){
 	println!("Listening");
 	println!("Type /help for a list of commands");
 	for stream in listener.incoming(){
-		let mut stream = match stream {
+		let stream = match stream {
 			Ok(val) => {val},
 			Err(_) => {println!("Connection failed");
 				continue;}

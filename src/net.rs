@@ -200,6 +200,7 @@ where RE_T: for<'a> serde::Deserialize<'a>
 	pub fn send<TR_T>(&mut self, mesg : &TR_T)
 	where TR_T: serde::Serialize
 	{
+		self.keep();
 		let mesg_ser : Vec<u8> = match bincode::serialize(mesg){
 		    Ok(val) => {val}
 		    Err(_) => {

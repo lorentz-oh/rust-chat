@@ -6,15 +6,17 @@ use std::sync::mpsc;
 struct Client{
 	should_stop : bool,
 	server : Option<Peer<SeMessage>>,
-	input_rx : mpsc::Receiver<String>
+	input_rx : mpsc::Receiver<String>,
+	username : String
 }
 
 impl Client{
-	pub fn new(input_rx : mpsc::Receiver<String>) -> Self{
+	pub fn new(input_rx : mpsc::Receiver<String>, username : String) -> Self{
 		return Client{
 			should_stop : false,
 			server : None,
-			input_rx
+			input_rx,
+			username
 		};
 	}
 
@@ -23,6 +25,19 @@ impl Client{
 		while !self.should_stop{
 			self.process_input();
 			self.process_messages();
+			self.reset_inactive();
+		}
+	}
+
+	pub fn reset_inactive(&mut self){
+		let server = match &mut self.server{
+		    Some(v) => {v}
+		    None => {return;}
+		};
+		//if had been silent for more than half of allowed max silence time
+		if server.silent_from.elapsed() > MAX_SILENCE / 2{
+			server.send(&ClMessage::Ping(server.token));
+			server.silent_from = time::Instant::now();
 		}
 	}
 
@@ -67,16 +82,15 @@ impl Client{
 	}
 
 	pub fn process_input(&mut self){
-		let mut input = match self.input_rx.try_recv(){
+		let input = match self.input_rx.try_recv(){
 		    Ok(v) => {v},
 		    Err(_) => {return;}
 		};
 		let mut command = input.trim().to_string();
 		let arg = match command.find(' ') {
-		    Some(pos) => {command.split_off(pos)}
+		    Some(pos) => {command.split_off(pos).trim().to_string()}
 		    None => {"".to_string()}
 		};
-
 		match command.as_str() {
 			"/help" => {
 				self.print_help();
@@ -90,8 +104,19 @@ impl Client{
 			"/info" => {
 				self.request_server_info();
 			}
-			"/join" => {self.join(arg);}
-			"/say" => {self.say(arg);}
+			"/join" => {
+				self.join(arg);
+			}
+			"/say" => {
+				self.say(arg);
+			}
+			"/name" => {
+				println!("Your name is {}", self.username);
+			}
+			"/chname" =>{
+				println!("Your name was changed from {} to {}", self.username, arg);
+				self.username = arg;
+			}
 			_ =>{println!("Unrecognized command. Try /help")}
 		}
 	}
@@ -123,13 +148,6 @@ impl Client{
 				return;
 			}
 		};
-		let username = match iter.next() {
-		    Some(v) => {v}
-		    None => {
-				eprintln!("No username provided");
-				return;
-			}
-		};
 		let stream = match std::net::TcpStream::connect(&addr){
 		    Ok(v) => {v}
 		    Err(e) => {
@@ -138,8 +156,8 @@ impl Client{
 			}
 		};
 		let mut peer : Peer<SeMessage> = Peer::new(&0u64, stream);
-		peer.username = username.to_string();
-		let hello = ClMessage::Hello(ClHello{username : username.to_string()});
+		peer.username = self.username.clone();
+		let hello = ClMessage::Hello(ClHello{username : self.username.clone()});
 		peer.send(&hello);
 		let started_at = std::time::Instant::now();
 		println!("Connecting...");
@@ -178,6 +196,7 @@ impl Client{
 			Some(server) => {
 				server.send(&ClMessage::IQuit(server.token));
 				self.server = None;
+				println!("Disconnected");
 			}
 			None => {
 				println!("Not connected to a server");
@@ -186,6 +205,7 @@ impl Client{
 	}
 
 	pub fn terminate(&mut self){
+		self.disconnect();
 		self.should_stop = true;
 	}
 
@@ -214,6 +234,8 @@ A list of availible commands:
 /say <message> - sends a message to the chat
 /exit - exits the program
 /info - prints information about server
+/name - prints your username
+/chname <name> - changes your username to <name>
 --------------------");
 	}
 
@@ -230,8 +252,13 @@ A list of availible commands:
 }
 
 fn main(){
+	let mut username = String::new();
+	println!("Enter your name: ");
+	std::io::stdin().read_line(&mut username);
+	username = username.trim().to_string();
+
 	let (tx, rx) = mpsc::channel();
-	let mut client = Client::new(rx);
+	let mut client = Client::new(rx, username);
 	let join_handle = std::thread::spawn(move || {Client::get_input(tx);});
 	client.run();
 }
